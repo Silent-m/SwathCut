@@ -1,0 +1,17 @@
+# Satellite data and third-party software (not redistributable / too large)
+Data/
+NOESYS_2_4/
+
+# Local working folders
+check/
+Preview/
+Claude outputs/
+
+# Build output (the .exe is published on the Releases page)
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
