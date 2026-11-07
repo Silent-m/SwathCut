@@ -22,6 +22,11 @@ No Python or other installation is needed (Windows 10/11, 64-bit).
 One text file is written per input file and swath. Granules that do not cross
 the area are skipped. Input and output folders are remembered between runs.
 
+## Screenshots
+
+<img src="docs/main_window.png" width="430" alt="SwathCut main window">
+<img src="docs/preview.png" width="560" alt="Preview map: GMI 89 GHz swath with the selection box">
+
 ## Output format
 
 ```
