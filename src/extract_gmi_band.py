@@ -194,7 +194,8 @@ def extract(fname, lat_min=50.0, lat_max=65.0, lon_min=-180.0, lon_max=180.0,
         if not found:
             raise ValueError("No Latitude/Longitude variables found in the file.")
         info = header_info(nc)
-        granule = str(int(stem.split("_")[4])) if stem.count("_") >= 4 else "?"
+        gnum = info.get("GranuleNumber", "").strip()  # from the file, not the file name
+        granule = str(int(gnum)) if gnum.isdigit() else "?"
 
         for gpath, g in found:
             tag = gpath.strip("/").replace("/", "_")
@@ -274,7 +275,8 @@ def extract_amsr3_l2(nc, stem, lat_min, lat_max, lon_min, lon_max, out_dir, log)
         return []
     written = []
     for labels, parts in tables.items():
-        table = np.nan_to_num(np.vstack(parts), nan=L2_MISSING)
+        table = np.nan_to_num(np.vstack(parts), nan=L2_MISSING,
+                              posinf=L2_MISSING, neginf=L2_MISSING)
         name = stem if len(tables) == 1 else f"{stem}_{labels[0]}"
         out = os.path.join(out_dir or ".", f"{name}_{lat_min:g}_{lat_max:g}N_"
                                            f"{lon_min:g}_{lon_max:g}E.txt")

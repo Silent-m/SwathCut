@@ -9,6 +9,7 @@ choose swaths and output folder, press Convert.
 """
 import json
 import os
+import queue
 import sys
 import threading
 import tkinter as tk
@@ -20,7 +21,7 @@ from netCDF4 import Dataset
 from extract_gmi_band import GMI_LABELS, extract, field_titles, preview_data
 
 APP_NAME = "SwathCut"
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 AUTHOR = "Lev Mitnik"
 
 HOW_TO = """1. Press Add... and pick one or more .nc files:
@@ -155,15 +156,26 @@ class ConverterApp(tk.Tk):
         # --- Log
         self.log_box = tk.Text(self, width=85, height=10, state=tk.DISABLED)
         self.log_box.grid(row=6, column=0, **pad)
+        self.messages = queue.Queue()  # filled by the conversion thread, read here
+        self.after(100, self.poll_messages)
 
     # ---------------------------------------------------------------- helpers
     def log(self, msg):
-        def put():
+        """Thread-safe: only queues the message; poll_messages() shows it."""
+        self.messages.put(msg)
+
+    def poll_messages(self):
+        """Runs in the window's thread: show queued messages; None = conversion finished."""
+        while not self.messages.empty():
+            msg = self.messages.get()
+            if msg is None:
+                self.convert_btn.state(["!disabled"])
+                continue
             self.log_box.configure(state=tk.NORMAL)
             self.log_box.insert(tk.END, msg + "\n")
             self.log_box.see(tk.END)
             self.log_box.configure(state=tk.DISABLED)
-        self.after(0, put)
+        self.after(100, self.poll_messages)
 
     def add_files(self):
         names = filedialog.askopenfilenames(title="Select .nc files",
@@ -299,7 +311,7 @@ class ConverterApp(tk.Tk):
                 except Exception as e:  # report and continue with next file
                     self.log(f"ERROR: {e}")
             self.log(f"Done: {n} file(s) written to {out_dir}")
-            self.after(0, lambda: self.convert_btn.state(["!disabled"]))
+            self.messages.put(None)  # re-enable Convert
 
         threading.Thread(target=work, daemon=True).start()
 
