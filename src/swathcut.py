@@ -1,6 +1,6 @@
 """
-SwathCut - cut a lat/lon area out of GPM GMI L1B or GOSAT-GW AMSR3 L1R swath
-files (.nc) and save the brightness temperatures as text. Window around extract_gmi_band.extract().
+SwathCut - cut a lat/lon area out of GPM GMI L1B or GOSAT-GW AMSR3 L1R / L2
+swath files (.nc) and save brightness temperatures or L2 products as text. Window around extract_gmi_band.extract().
 
     python swathcut.py
 
@@ -17,26 +17,30 @@ from tkinter import filedialog, messagebox, ttk
 import numpy as np
 from netCDF4 import Dataset
 
-from extract_gmi_band import GMI_LABELS, extract, preview_data
+from extract_gmi_band import GMI_LABELS, extract, field_titles, preview_data
 
 APP_NAME = "SwathCut"
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 AUTHOR = "Lev Mitnik"
 
 HOW_TO = """1. Press Add... and pick one or more .nc files:
-   GPM GMI L1B, or GOSAT-GW AMSR3 L1R (Resampled Tb, *_S1RTBR*).
+   GPM GMI L1B, or GOSAT-GW AMSR3 L1R (Resampled Tb, *_S1RTBR*)
+   or AMSR3 Level-2 swath products (TPW, CLW, PRC, SST, SSW, ASW, ...).
 2. Set the area: type Lat/Lon limits, or press Preview / select area
    and draw (or drag/resize) the box on the map.
    Longitudes are -180..180; Lon min > Lon max crosses the 180 meridian.
 3. GMI: tick the swaths S1 (10-89 GHz) and/or S2 (166-183 GHz).
-   AMSR3: always one low_freq file (6.9-36.5 GHz, 6.9 GHz footprint),
+   AMSR3 L1R: one low_freq file (6.9-36.5 GHz, 6.9 GHz footprint),
    in the same layout as AMSR2 *_low_freq.txt.
+   AMSR3 L2: one file with a column per product field;
+   -999 where JAXA flags a field as NoData.
 4. Choose the output folder (default: folder of the first file).
    The area and the folders are remembered for the next start.
 5. Press Convert. One .txt file is written per file and swath.
 
 Output: 3 header lines (time, orbit, equator crossing), a
-#lat #lon #channel... line, then "lat lon Tb..." rows in K."""
+#lat #lon #channel... line, then "lat lon value..." rows
+(Tb in K; L2 products in their own units)."""
 
 SETTINGS = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")),
                         APP_NAME, "settings.json")
@@ -69,8 +73,8 @@ def save_settings(**changes):
 ABOUT = f"""{APP_NAME}  version {__version__}
 
 Extracts a latitude/longitude area from GPM GMI Level-1B and
-GOSAT-GW AMSR3 Level-1R swath files (.nc) and saves
-brightness temperatures as text.
+GOSAT-GW AMSR3 Level-1R and Level-2 swath files (.nc) and
+saves brightness temperatures or L2 products as text.
 
 \u00a9 2026 {AUTHOR}. Released under the MIT License.
 
@@ -123,7 +127,7 @@ class ConverterApp(tk.Tk):
             ttk.Entry(af, textvariable=self.box[key], width=8).grid(row=0, column=2 * col + 1, **pad)
 
         # --- Swaths
-        sf = ttk.LabelFrame(self, text="GMI swaths  (AMSR3 L1R: always one low_freq file)")
+        sf = ttk.LabelFrame(self, text="GMI swaths  (AMSR3: always one file per input)")
         sf.grid(row=3, column=0, sticky="ew", **pad)
         self.s1 = tk.BooleanVar(value=True)
         self.s2 = tk.BooleanVar(value=False)
@@ -214,12 +218,13 @@ class ConverterApp(tk.Tk):
         try:
             with Dataset(fname) as nc:
                 lat, lon, tb, labels = preview_data(nc)
+                titles = field_titles(nc, labels)
         except (OSError, KeyError, ValueError) as e:
             messagebox.showerror("Preview", f"{os.path.basename(fname)}:\n{e}")
             return
         self.channel["values"] = labels  # GMI and AMSR3 have different channels
         if self.channel.get() not in labels:
-            self.channel.set(labels[-2])  # 89v for GMI, 36-v for AMSR3
+            self.channel.set(labels[max(len(labels) - 2, 0)])  # 89v GMI, 36-v L1R, 1st L2 field
         step = 2  # thin out for speed
         lat, lon = lat[::step, ::step], lon[::step, ::step]
         tb = tb[::step, ::step, labels.index(self.channel.get())]
@@ -230,13 +235,15 @@ class ConverterApp(tk.Tk):
         fig = Figure(figsize=(9, 5), dpi=100)
         ax = fig.add_subplot()
         sc = ax.scatter(lon[ok], lat[ok], c=tb[ok], s=1, cmap="jet", rasterized=True)
-        fig.colorbar(sc, ax=ax, label=f"Tb {self.channel.get()} (K)")
+        title, units = titles.get(self.channel.get(), (self.channel.get(), ""))
+        fig.colorbar(sc, ax=ax, label=units)
         ax.set_xlim(-180, 180)
         ax.set_ylim(-90, 90)
         ax.set_xlabel("Longitude")
         ax.set_ylabel("Latitude")
         ax.grid(True, lw=0.5, color="k", alpha=0.4)
-        ax.set_title("Draw a new area, or drag/resize the box")
+        ax.set_title(title)
+        fig.text(0.01, 0.01, "Draw a new area, or drag/resize the box", fontsize=8, color="gray")
 
         def on_select(_press, _release):
             x0, x1, y0, y1 = selector.extents
