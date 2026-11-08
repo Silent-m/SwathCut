@@ -1,5 +1,6 @@
 """
-Extract GPM GMI L1B pixels within a lat/lon box and write them to text.
+Extract GPM GMI L1B or GOSAT-GW AMSR3 L1R pixels within a lat/lon box and write
+them to text.
 
 Usage:
     python extract_gmi_band.py FILE.nc [lat_min lat_max [lon_min lon_max]]
@@ -11,6 +12,10 @@ selects a box crossing the 180 meridian.
 Output layout follows the AMSR2 *_low_freq.txt files used with NOESYS:
 three header lines (time, orbit, equator crossing), a #lat #lon #ch... line,
 then "lat lon Tb..." rows.
+
+AMSR3 L1R gives one file, *_low_freq_*.txt, with the AMSR2 low_freq channels
+(6.925, 7.3, 10.65, 18.7, 23.8, 36.42 GHz V/H) all at the 6.9 GHz footprint
+(FOV06). The overlap scans shared with the neighbouring granules are dropped.
 """
 import os
 import sys
@@ -22,6 +27,37 @@ GMI_LABELS = {
     9: ["10v", "10h", "18v", "18h", "23v", "36v", "36h", "89v", "89h"],
     4: ["166v", "166h", "183+-3v", "183+-7v"],
 }
+
+# AMSR3 L1R: (output label, variable name) - same columns as AMSR2 *_low_freq.txt
+AMSR3_LOW_FREQ = [(f"{f}-{p.lower()}", f"Tb_FOV06Ch{c}{p}_P89o")
+                  for f, c in (("6", "06"), ("7", "07"), ("10", "10"),
+                               ("18", "18"), ("23", "23"), ("36", "36"))
+                  for p in "VH"]
+
+
+def is_amsr3(nc):
+    return getattr(nc, "SensorShortName", "") == "AMSR3"
+
+
+def amsr3_low_freq(nc):
+    """lat, lon, Tb[scan, pixel, 12] and labels from an AMSR3 L1R file, overlap scans removed."""
+    if AMSR3_LOW_FREQ[0][1] not in nc.variables:
+        raise ValueError("AMSR3: only L1R files (Resampled Brightness Temperature, "
+                         "*_S1RTBR*) are supported.")
+    n = int(getattr(nc, "NumberOfScansOverlap", 0))
+    keep = slice(n, len(nc.dimensions["time"]) - n)
+    lat = as_float(nc["Latitude_P89o"])[keep]
+    lon = as_float(nc["Longitude_P89o"])[keep]
+    tb = np.stack([as_float(nc[v])[keep] for _, v in AMSR3_LOW_FREQ], axis=-1)
+    return lat, lon, tb, [lab for lab, _ in AMSR3_LOW_FREQ]
+
+
+def preview_data(nc):
+    """lat, lon, Tb[..., ch], labels of the first swath (GMI S1 or AMSR3 low_freq)."""
+    if is_amsr3(nc):
+        return amsr3_low_freq(nc)
+    g = nc["S1"]
+    return as_float(g["Latitude"]), as_float(g["Longitude"]), as_float(g["Tb"]), GMI_LABELS[9]
 
 
 def find_swaths(grp, path=""):
@@ -77,6 +113,8 @@ def extract(fname, lat_min=50.0, lat_max=65.0, lon_min=-180.0, lon_max=180.0,
     out_dir = out_dir or "."
     written = []
     with Dataset(fname) as nc:
+        if is_amsr3(nc):
+            return extract_amsr3(nc, stem, lat_min, lat_max, lon_min, lon_max, out_dir, log)
         found = find_swaths(nc)
         if not found:
             raise ValueError("No Latitude/Longitude variables found in the file.")
@@ -123,6 +161,29 @@ def extract(fname, lat_min=50.0, lat_max=65.0, lon_min=-180.0, lon_max=180.0,
             log(f"{tag}: {len(table)} pixels -> {out}")
             written.append(out)
     return written
+
+
+def extract_amsr3(nc, stem, lat_min, lat_max, lon_min, lon_max, out_dir, log):
+    """AMSR3 L1R -> one *_low_freq_*.txt file in the AMSR2 low_freq layout."""
+    lat, lon, tb, labels = amsr3_low_freq(nc)
+    mask = (lat >= lat_min) & (lat <= lat_max) & lon_mask(lon, lon_min, lon_max)
+    mask &= np.isfinite(tb).all(axis=-1)
+    if not mask.any():
+        log("low_freq: no pixels in the box, skipped")
+        return []
+    header = "\n".join([
+        f"Begin: {nc.time_coverage_start} End: {nc.time_coverage_end}",
+        f"Start Orbit: {nc.OrbitNumberStart} Stop Orbit: {nc.OrbitNumberEnd}",
+        f"Equatorial Cross. Lon: {float(nc.ObservationEquatorCrossingLongitude):.2f}  "
+        f"Equatorial Cross. time: {nc.ObservationEquatorCrossingDateTime}",
+        " ".join(["#lat", "#lon"] + ["#" + s for s in labels]),
+    ])
+    table = np.column_stack([lat[mask], lon[mask], tb[mask]])
+    out = os.path.join(out_dir or ".", f"{stem}_low_freq_{lat_min:g}_{lat_max:g}N_"
+                                       f"{lon_min:g}_{lon_max:g}E.txt")
+    np.savetxt(out, table, fmt="%.2f", header=header, comments="")
+    log(f"low_freq: {len(table)} pixels -> {out}")
+    return [out]
 
 
 if __name__ == "__main__":
