@@ -20,7 +20,7 @@ from netCDF4 import Dataset
 from extract_gmi_band import GMI_LABELS, extract, preview_data
 
 APP_NAME = "SwathCut"
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 AUTHOR = "Lev Mitnik"
 
 HOW_TO = """1. Press Add... and pick one or more .nc files:
