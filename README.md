@@ -2,8 +2,19 @@
 
 # SwathCut
 
-Cut a latitude/longitude area out of **GPM GMI Level-1B** swath files (`.nc`)
-and save the brightness temperatures as plain text.
+Cut a latitude/longitude area out of satellite microwave swath files (`.nc`)
+and save it as plain text: brightness temperatures from **GPM GMI** and
+**GOSAT-GW AMSR3**, and AMSR3 **Level-2** products.
+
+## Supported files
+
+| Instrument | Product | File name contains | Output |
+|---|---|---|---|
+| GPM GMI | L1B brightness temperature | `1BS` / `1B.GPM.GMI` | one file per swath (S1, S2) |
+| GOSAT-GW AMSR3 | L1R resampled brightness temperature | `S1RTBR` | one `low_freq` file, AMSR2 layout |
+| GOSAT-GW AMSR3 | L2 swath products: TPW, CLW, PRC, SST, SSW, ASW, … | `S2…` | one file, a column per field |
+
+AMSR3 files are available from JAXA [G-Portal](https://gportal.jaxa.jp/).
 
 ## Download
 
@@ -12,15 +23,15 @@ No Python or other installation is needed (Windows 10/11, 64-bit).
 
 ## Use
 
-1. **Add...** one or more GMI L1B files (`1B.GPM.GMI…` / `GPMCOR_GMI_…_1BS_…nc`).
+1. **Add...** one or more `.nc` files of the kinds listed above.
 2. Set the area: type Lat/Lon limits, or press **Preview / select area** and
    draw, drag or resize the box on the swath map.
    Longitudes are −180…180; *Lon min > Lon max* selects a box across the 180° meridian.
-3. Tick the swaths: **S1** (10–89 GHz) and/or **S2** (166–183 GHz).
+3. GMI only: tick the swaths **S1** (10–89 GHz) and/or **S2** (166–183 GHz).
 4. Choose the output folder and press **Convert**.
 
-One text file is written per input file and swath. Granules that do not cross
-the area are skipped. Input and output folders are remembered between runs.
+Granules that do not cross the area are skipped. The area and the input and
+output folders are remembered between runs.
 
 ## Screenshots
 
@@ -38,9 +49,25 @@ Equatorial Cross. Lon: 179.82  Equatorial Cross. time: 2026-03-18T17:00:43.793Z
 ...
 ```
 
-Latitude, longitude (degrees) and brightness temperatures (K), one pixel per row;
-pixels with missing data are dropped. S2 files have the columns
-`#166v #166h #183+-3v #183+-7v`.
+Three header lines (time, orbit, equator crossing), a column line, then one
+pixel per row: latitude, longitude (degrees) and the values.
+
+- **GMI L1B** (above): brightness temperatures in K; pixels with missing data are
+  dropped. S2 files have the columns `#166v #166h #183+-3v #183+-7v`.
+- **AMSR3 L1R** (`…_low_freq_….txt`): the same 12 channels as the AMSR2
+  `*_low_freq.txt` files, all at the 6.9 GHz footprint:
+  `#lat #lon #6-v #6-h #7-v #7-h #10-v #10-h #18-v #18-h #23-v #23-h #36-v #36-h`
+  (10 = 10.65 GHz). Scans overlapping the neighbouring granules are dropped.
+- **AMSR3 L2**: one column per product field, in the product's units, e.g.
+
+  ```
+  #lat #lon #SST_6G #SST_10G #SST_Multi
+  30.00 152.18 20.405 20.095 20.347
+  ```
+
+  Fields that JAXA flags as *NoData* are written as `-999.000`; rows where every
+  field is *NoData* are dropped. *LowQuality* values are kept. Precipitation (PRC)
+  combines the 89 GHz A and B footprints in one file.
 
 ## Run from source
 
@@ -64,8 +91,11 @@ pip install -r requirements.txt pyinstaller
 build_exe.bat
 ```
 
-The result is `dist\SwathCut.exe`.
+The result is `dist\SwathCut.exe`. `build_exe.bat` first runs
+`tools\extract_tcltk.py`, which copies the Tcl/Tk libraries out of the Python
+installation so the window also works with Tcl/Tk 9 (Python 3.14.10 and newer).
 
 ## License
 
 MIT © 2026 Lev Mitnik. GMI data: NASA / JAXA Global Precipitation Measurement mission.
+AMSR3 data: JAXA GOSAT-GW mission.
