@@ -1,6 +1,6 @@
 """
-SwathCut - cut a lat/lon area out of GPM GMI L1B swath files (.nc) and save
-the brightness temperatures as text. Window around extract_gmi_band.extract().
+SwathCut - cut a lat/lon area out of GPM GMI L1B or GOSAT-GW AMSR3 L1R swath
+files (.nc) and save the brightness temperatures as text. Window around extract_gmi_band.extract().
 
     python swathcut.py
 
@@ -17,18 +17,22 @@ from tkinter import filedialog, messagebox, ttk
 import numpy as np
 from netCDF4 import Dataset
 
-from extract_gmi_band import GMI_LABELS, as_float, extract
+from extract_gmi_band import GMI_LABELS, extract, preview_data
 
 APP_NAME = "SwathCut"
 __version__ = "0.1.0"
 AUTHOR = "Lev Mitnik"
 
-HOW_TO = """1. Press Add... and pick one or more GPM GMI L1B files (.nc).
+HOW_TO = """1. Press Add... and pick one or more .nc files:
+   GPM GMI L1B, or GOSAT-GW AMSR3 L1R (Resampled Tb, *_S1RTBR*).
 2. Set the area: type Lat/Lon limits, or press Preview / select area
    and draw (or drag/resize) the box on the map.
    Longitudes are -180..180; Lon min > Lon max crosses the 180 meridian.
-3. Tick the swaths: S1 (10-89 GHz) and/or S2 (166-183 GHz).
+3. GMI: tick the swaths S1 (10-89 GHz) and/or S2 (166-183 GHz).
+   AMSR3: always one low_freq file (6.9-36.5 GHz, 6.9 GHz footprint),
+   in the same layout as AMSR2 *_low_freq.txt.
 4. Choose the output folder (default: folder of the first file).
+   The area and the folders are remembered for the next start.
 5. Press Convert. One .txt file is written per file and swath.
 
 Output: 3 header lines (time, orbit, equator crossing), a
@@ -64,12 +68,14 @@ def save_settings(**changes):
 
 ABOUT = f"""{APP_NAME}  version {__version__}
 
-Extracts a latitude/longitude area from GPM GMI Level-1B
-swath files (.nc) and saves brightness temperatures as text.
+Extracts a latitude/longitude area from GPM GMI Level-1B and
+GOSAT-GW AMSR3 Level-1R swath files (.nc) and saves
+brightness temperatures as text.
 
 \u00a9 2026 {AUTHOR}. Released under the MIT License.
 
-GMI data: NASA / JAXA Global Precipitation Measurement mission."""
+GMI data: NASA / JAXA Global Precipitation Measurement mission.
+AMSR3 data: JAXA GOSAT-GW mission."""
 
 
 class ConverterApp(tk.Tk):
@@ -107,15 +113,17 @@ class ConverterApp(tk.Tk):
         af = ttk.LabelFrame(self, text="Area (degrees, longitude -180..180)")
         af.grid(row=2, column=0, sticky="ew", **pad)
         self.box = {}
+        saved_box = load_settings().get("box", {})
         for col, (key, label, default) in enumerate([
                 ("lat_min", "Lat min", "50"), ("lat_max", "Lat max", "65"),
                 ("lon_min", "Lon min", "-180"), ("lon_max", "Lon max", "180")]):
             ttk.Label(af, text=label).grid(row=0, column=2 * col, sticky="e", **pad)
-            self.box[key] = tk.StringVar(value=default)
+            v = saved_box.get(key)
+            self.box[key] = tk.StringVar(value=f"{v:g}" if isinstance(v, (int, float)) else default)
             ttk.Entry(af, textvariable=self.box[key], width=8).grid(row=0, column=2 * col + 1, **pad)
 
         # --- Swaths
-        sf = ttk.LabelFrame(self, text="Swaths")
+        sf = ttk.LabelFrame(self, text="GMI swaths  (AMSR3 L1R: always one low_freq file)")
         sf.grid(row=3, column=0, sticky="ew", **pad)
         self.s1 = tk.BooleanVar(value=True)
         self.s2 = tk.BooleanVar(value=False)
@@ -203,13 +211,18 @@ class ConverterApp(tk.Tk):
             return
 
         fname = self.files.get(idx)
-        ich = GMI_LABELS[9].index(self.channel.get())
-        with Dataset(fname) as nc:
-            g = nc["S1"]
-            step = 2  # thin out for speed
-            lat = as_float(g["Latitude"])[::step, ::step]
-            lon = as_float(g["Longitude"])[::step, ::step]
-            tb = as_float(g["Tb"])[::step, ::step, ich]
+        try:
+            with Dataset(fname) as nc:
+                lat, lon, tb, labels = preview_data(nc)
+        except (OSError, KeyError, ValueError) as e:
+            messagebox.showerror("Preview", f"{os.path.basename(fname)}:\n{e}")
+            return
+        self.channel["values"] = labels  # GMI and AMSR3 have different channels
+        if self.channel.get() not in labels:
+            self.channel.set(labels[-2])  # 89v for GMI, 36-v for AMSR3
+        step = 2  # thin out for speed
+        lat, lon = lat[::step, ::step], lon[::step, ::step]
+        tb = tb[::step, ::step, labels.index(self.channel.get())]
         ok = np.isfinite(lat) & np.isfinite(lon) & np.isfinite(tb)
 
         win = tk.Toplevel(self)
@@ -266,7 +279,7 @@ class ConverterApp(tk.Tk):
             return
         out_dir = self.out_dir.get() or os.path.dirname(files[0])
         os.makedirs(out_dir, exist_ok=True)
-        save_settings(output_dir=out_dir)
+        save_settings(output_dir=out_dir, box=b)
 
         self.convert_btn.state(["disabled"])
 
