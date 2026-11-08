@@ -14,7 +14,8 @@ import tkinter
 dest = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.join("build", "tcltk"))
 root = tkinter.Tk()
 root.withdraw()
-libs = {"tcl": root.tk.eval("info library"), "tk": root.tk.globalgetvar("tk_library")}
+libs = {"tcl": str(root.tk.eval("info library")),
+        "tk": str(root.tk.globalgetvar("tk_library"))}  # Tk may return a Tcl_Obj
 
 shutil.rmtree(dest, ignore_errors=True)
 os.makedirs(dest)
