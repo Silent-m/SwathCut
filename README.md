@@ -11,6 +11,7 @@ and save it as plain text: brightness temperatures from **GPM GMI** and
 | Instrument | Product | File name contains | Output |
 |---|---|---|---|
 | GPM GMI | L1B brightness temperature | `1BS` / `1B.GPM.GMI` | one file per swath (S1, S2) |
+| GOSAT-GW AMSR3 | L1B brightness temperature | `S1BTBB` | `low_freq`, `89GHz`, `165GHz`, `183GHz` files |
 | GOSAT-GW AMSR3 | L1R resampled brightness temperature | `S1RTBR` | one `low_freq` file, AMSR2 layout |
 | GOSAT-GW AMSR3 | L2 swath products: TPW, CLW, PRC, SST, SSW, ASW, … | `S2…` | one file, a column per field |
 
@@ -58,6 +59,11 @@ pixel per row: latitude, longitude (degrees) and the values.
   `*_low_freq.txt` files, all at the 6.9 GHz footprint:
   `#lat #lon #6-v #6-h #7-v #7-h #10-v #10-h #18-v #18-h #23-v #23-h #36-v #36-h`
   (10 = 10.65 GHz). Scans overlapping the neighbouring granules are dropped.
+- **AMSR3 L1B**: the same `low_freq` file, at the 6.925 GHz footprint positions
+  (the 6.9–36.5 GHz footprints coincide within ~2 km), plus files at their own
+  footprint positions: `…_89GHz_…` (`#89-v #89-h`, A and B scans as separate
+  rows), `…_165GHz_…` (`#165-v`) and `…_183GHz_…` (`#183+-3-v #183+-7-v`).
+  Pixels flagged with geometry or Tb errors are dropped; RFI flags are ignored.
 - **AMSR3 L2**: one column per product field, in the product's units, e.g.
 
   ```
