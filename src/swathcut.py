@@ -1,5 +1,5 @@
 """
-SwathCut - cut a lat/lon area out of GPM GMI L1B or GOSAT-GW AMSR3 L1R / L2
+SwathCut - cut a lat/lon area out of GPM GMI L1B or GOSAT-GW AMSR3 L1B / L1R / L2
 swath files (.nc) and save brightness temperatures or L2 products as text. Window around extract_gmi_band.extract().
 
     python swathcut.py
@@ -21,11 +21,11 @@ from netCDF4 import Dataset
 from extract_gmi_band import GMI_LABELS, extract, field_titles, preview_data
 
 APP_NAME = "SwathCut"
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 AUTHOR = "Lev Mitnik"
 
 HOW_TO = """1. Press Add... and pick one or more .nc files:
-   GPM GMI L1B, or GOSAT-GW AMSR3 L1R (Resampled Tb, *_S1RTBR*)
+   GPM GMI L1B, GOSAT-GW AMSR3 L1B (*_S1BTBB*) or L1R (*_S1RTBR*)
    or AMSR3 Level-2 swath products (TPW, CLW, PRC, SST, SSW, ASW, ...).
 2. Set the area: type Lat/Lon limits, or press Preview / select area
    and draw (or drag/resize) the box on the map.
@@ -33,6 +33,8 @@ HOW_TO = """1. Press Add... and pick one or more .nc files:
 3. GMI: tick the swaths S1 (10-89 GHz) and/or S2 (166-183 GHz).
    AMSR3 L1R: one low_freq file (6.9-36.5 GHz, 6.9 GHz footprint),
    in the same layout as AMSR2 *_low_freq.txt.
+   AMSR3 L1B: the same low_freq file (at the 6.9 GHz positions), plus
+   89GHz, 165GHz and 183GHz files at their own footprint positions.
    AMSR3 L2: one file with a column per product field;
    -999 where JAXA flags a field as NoData.
 4. Choose the output folder (default: folder of the first file).
@@ -74,7 +76,7 @@ def save_settings(**changes):
 ABOUT = f"""{APP_NAME}  version {__version__}
 
 Extracts a latitude/longitude area from GPM GMI Level-1B and
-GOSAT-GW AMSR3 Level-1R and Level-2 swath files (.nc) and
+GOSAT-GW AMSR3 Level-1B, Level-1R and Level-2 swath files (.nc) and
 saves brightness temperatures or L2 products as text.
 
 \u00a9 2026 {AUTHOR}. Released under the MIT License.
@@ -87,7 +89,9 @@ class ConverterApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_NAME)
-        self.resizable(False, False)
+        self.columnconfigure(0, weight=1)  # resizable: the file list and the log grow
+        self.rowconfigure(1, weight=1)
+        self.rowconfigure(6, weight=2)
         try:
             self.iconbitmap(default=resource("swathcut.ico"))  # also used by the preview window
         except tk.TclError:
@@ -108,9 +112,11 @@ class ConverterApp(tk.Tk):
 
         # --- Files
         ff = ttk.LabelFrame(self, text="Input files (.nc)")
-        ff.grid(row=1, column=0, sticky="ew", **pad)
+        ff.grid(row=1, column=0, sticky="nsew", **pad)
+        ff.columnconfigure(0, weight=1)
+        ff.rowconfigure(1, weight=1)
         self.files = tk.Listbox(ff, width=70, height=5, selectmode=tk.EXTENDED)
-        self.files.grid(row=0, column=0, rowspan=2, **pad)
+        self.files.grid(row=0, column=0, rowspan=2, sticky="nsew", **pad)
         ttk.Button(ff, text="Add...", command=self.add_files).grid(row=0, column=1, sticky="ew", **pad)
         ttk.Button(ff, text="Remove", command=self.remove_files).grid(row=1, column=1, sticky="new", **pad)
 
@@ -128,7 +134,7 @@ class ConverterApp(tk.Tk):
             ttk.Entry(af, textvariable=self.box[key], width=8).grid(row=0, column=2 * col + 1, **pad)
 
         # --- Swaths
-        sf = ttk.LabelFrame(self, text="GMI swaths  (AMSR3: always one file per input)")
+        sf = ttk.LabelFrame(self, text="GMI swaths  (AMSR3: files chosen automatically)")
         sf.grid(row=3, column=0, sticky="ew", **pad)
         self.s1 = tk.BooleanVar(value=True)
         self.s2 = tk.BooleanVar(value=False)
@@ -139,7 +145,8 @@ class ConverterApp(tk.Tk):
         of = ttk.LabelFrame(self, text="Output folder")
         of.grid(row=4, column=0, sticky="ew", **pad)
         self.out_dir = tk.StringVar(value=load_settings().get("output_dir", ""))
-        ttk.Entry(of, textvariable=self.out_dir, width=62).grid(row=0, column=0, **pad)
+        of.columnconfigure(0, weight=1)
+        ttk.Entry(of, textvariable=self.out_dir, width=62).grid(row=0, column=0, sticky="ew", **pad)
         ttk.Button(of, text="Browse...", command=self.pick_out_dir).grid(row=0, column=1, **pad)
 
         # --- Actions
@@ -152,10 +159,13 @@ class ConverterApp(tk.Tk):
         ttk.Button(bf, text="Preview / select area", command=self.preview).pack(side=tk.LEFT, padx=6)
         self.convert_btn = ttk.Button(bf, text="Convert", command=self.convert)
         self.convert_btn.pack(side=tk.RIGHT, padx=6)
+        ttk.Button(bf, text="Clear log", command=self.clear_log).pack(side=tk.RIGHT, padx=6)
 
         # --- Log
         self.log_box = tk.Text(self, width=85, height=10, state=tk.DISABLED)
-        self.log_box.grid(row=6, column=0, **pad)
+        self.log_box.grid(row=6, column=0, sticky="nsew", **pad)
+        self.update_idletasks()
+        self.minsize(self.winfo_reqwidth(), self.winfo_reqheight())  # not smaller than at start
         self.messages = queue.Queue()  # filled by the conversion thread, read here
         self.after(100, self.poll_messages)
 
@@ -163,6 +173,11 @@ class ConverterApp(tk.Tk):
     def log(self, msg):
         """Thread-safe: only queues the message; poll_messages() shows it."""
         self.messages.put(msg)
+
+    def clear_log(self):
+        self.log_box.configure(state=tk.NORMAL)
+        self.log_box.delete("1.0", tk.END)
+        self.log_box.configure(state=tk.DISABLED)
 
     def poll_messages(self):
         """Runs in the window's thread: show queued messages; None = conversion finished."""

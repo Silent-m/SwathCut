@@ -17,6 +17,11 @@ AMSR3 L1R gives one file, *_low_freq_*.txt, with the AMSR2 low_freq channels
 (6.925, 7.3, 10.65, 18.7, 23.8, 36.42 GHz V/H) all at the 6.9 GHz footprint
 (FOV06). The overlap scans shared with the neighbouring granules are dropped.
 
+AMSR3 L1B gives the same low_freq file (at the 6.925 GHz footprint positions;
+6.9-36.5 GHz footprints coincide within ~2 km) plus *_89GHz_* (A and B scans),
+*_165GHz_* and *_183GHz_* files at their own footprint positions. Pixels with
+geometry/Tb errors or count drop-off flags are dropped; RFI flags are ignored.
+
 AMSR3 L2 (TPW, CLW, PRC, SST, SSW, ASW, SIC, HSI, ...) gives one file with a
 column per product field (e.g. #SST_6G #SST_10G #SST_Multi). Pixels flagged
 NoData get -999 in that column; rows where every field is NoData are dropped.
@@ -38,6 +43,18 @@ AMSR3_LOW_FREQ = [(f"{f}-{p.lower()}", f"Tb_FOV06Ch{c}{p}_P89o")
                                ("18", "18"), ("23", "23"), ("36", "36"))
                   for p in "VH"]
 
+# AMSR3 L1B: (output file part, footprint, [(label, variable), ...]).
+# Groups with the same file part (89 GHz A and B) are written to one file.
+AMSR3_L1B_GROUPS = [
+    ("low_freq", "P06", [(lab, v.replace("_FOV06", "_").replace("_P89o", ""))
+                         for lab, v in AMSR3_LOW_FREQ]),
+    ("89GHz", "P89A", [("89-v", "Tb_Ch89AV"), ("89-h", "Tb_Ch89AH")]),
+    ("89GHz", "P89B", [("89-v", "Tb_Ch89BV"), ("89-h", "Tb_Ch89BH")]),
+    ("165GHz", "P165", [("165-v", "Tb_Ch165V")]),
+    ("183GHz", "P183r3", [("183+-3-v", "Tb_Ch183r3V"), ("183+-7-v", "Tb_Ch183r7V")]),
+]
+L1B_BAD_FLAGS = 4 | 8 | 128  # geometric error, Tb error, count drop-off (RFI bits 0-1 ignored)
+
 # AMSR3 L2 quality flags: 0-63 Good, 64-127 LowQuality, 128-254 NoData, 255 fill.
 # LowQuality values are kept; set this to 64 to drop them as well.
 L2_NODATA_FROM = 128
@@ -52,10 +69,14 @@ def amsr3_kind(nc):
     """'L1R', 'L2', or an error for AMSR3 files SwathCut cannot read."""
     if AMSR3_LOW_FREQ[0][1] in nc.variables:
         return "L1R"
-    if "DataDatasetName" in nc.ncattrs():
-        return "L2"
-    raise ValueError("AMSR3: only L1R (Resampled Tb, *_S1RTBR*) and Level-2 "
-                     "swath files are supported.")
+    if "Tb_Ch06V" in nc.variables and "Latitude_P06" in nc.variables:
+        return "L1B"
+    if "DataDatasetName" in nc.ncattrs():  # L2 - but L1B has this attribute too
+        first = nc.DataDatasetName.split(";")[0].strip()
+        if first in nc.variables and "Latitude_" + first.rsplit("_", 1)[-1] in nc.variables:
+            return "L2"
+    product = getattr(nc, "ProductName", "this AMSR3 product")
+    raise ValueError(f"{product} is not supported. Use AMSR3 L1B, L1R or Level-2 swath files.")
 
 
 def amsr3_header(nc):
@@ -90,6 +111,27 @@ def amsr3_l2(nc):
             for fp, items in groups.items()]
 
 
+def amsr3_l1b(nc):
+    """[(file part, lat, lon, Tb[scan, pixel, n], labels), ...] from an AMSR3 L1B file.
+
+    Overlap scans are removed; flagged pixels (L1B_BAD_FLAGS) are NaN.
+    """
+    n = int(getattr(nc, "NumberOfScansOverlap", 0))
+    keep = slice(n, len(nc.dimensions["time"]) - n)
+    out = []
+    for part, fp, chans in AMSR3_L1B_GROUPS:
+        tbs = []
+        for _, v in chans:
+            tb = as_float(nc[v])[keep]
+            if v + "_Quality" in nc.variables:
+                q = np.ma.filled(nc[v + "_Quality"][:], 255)[keep]
+                tb[(q == 255) | ((q & L1B_BAD_FLAGS) > 0)] = np.nan
+            tbs.append(tb)
+        out.append((part, as_float(nc["Latitude_" + fp])[keep], as_float(nc["Longitude_" + fp])[keep],
+                    np.stack(tbs, axis=-1), [lab for lab, _ in chans]))
+    return out
+
+
 def amsr3_low_freq(nc):
     """lat, lon, Tb[scan, pixel, 12] and labels from an AMSR3 L1R file, overlap scans removed."""
     n = int(getattr(nc, "NumberOfScansOverlap", 0))
@@ -103,7 +145,10 @@ def amsr3_low_freq(nc):
 def preview_data(nc):
     """lat, lon, Tb[..., ch], labels of the first swath (GMI S1 or AMSR3 low_freq)."""
     if is_amsr3(nc):
-        return amsr3_low_freq(nc) if amsr3_kind(nc) == "L1R" else amsr3_l2(nc)[0]
+        kind = amsr3_kind(nc)
+        if kind == "L1B":
+            return amsr3_l1b(nc)[0][1:]  # the low_freq group
+        return amsr3_low_freq(nc) if kind == "L1R" else amsr3_l2(nc)[0]
     g = nc["S1"]
     return as_float(g["Latitude"]), as_float(g["Longitude"]), as_float(g["Tb"]), GMI_LABELS[9]
 
@@ -118,9 +163,11 @@ def field_titles(nc, labels):
     if not is_amsr3(nc):
         return {lab: (f"GMI brightness temperature {GMI_FREQ[lab[:-1]]} GHz {lab[-1].upper()}", "K")
                 for lab in labels if lab[:-1] in GMI_FREQ}
-    if amsr3_kind(nc) == "L1R":
-        names = dict(AMSR3_LOW_FREQ)
-        return {lab: ("AMSR3 " + nc[names[lab]].long_name.split(" (")[0], "K") for lab in labels}
+    kind = amsr3_kind(nc)
+    if kind in ("L1R", "L1B"):
+        names = dict(AMSR3_LOW_FREQ if kind == "L1R" else AMSR3_L1B_GROUPS[0][2])
+        return {lab: (f"AMSR3 {kind} " + nc[names[lab]].long_name.split(" (")[0], "K")
+                for lab in labels}
     names = [n.strip() for n in nc.DataDatasetName.split(";") if n.strip()]
     codes = [c.strip() for c in getattr(nc, "DataCode", "").split(";") if c.strip()]
     longs = [t.strip() for t in getattr(nc, "DataLongName", "").split(";") if t.strip()]
@@ -241,8 +288,11 @@ def extract(fname, lat_min=50.0, lat_max=65.0, lon_min=-180.0, lon_max=180.0,
 
 def extract_amsr3(nc, stem, lat_min, lat_max, lon_min, lon_max, out_dir, log):
     """AMSR3 L1R -> one *_low_freq_*.txt file in the AMSR2 low_freq layout."""
-    if amsr3_kind(nc) == "L2":
+    kind = amsr3_kind(nc)
+    if kind == "L2":
         return extract_amsr3_l2(nc, stem, lat_min, lat_max, lon_min, lon_max, out_dir, log)
+    if kind == "L1B":
+        return extract_amsr3_l1b(nc, stem, lat_min, lat_max, lon_min, lon_max, out_dir, log)
     lat, lon, tb, labels = amsr3_low_freq(nc)
     mask = (lat >= lat_min) & (lat <= lat_max) & lon_mask(lon, lon_min, lon_max)
     mask &= np.isfinite(tb).all(axis=-1)
@@ -256,6 +306,31 @@ def extract_amsr3(nc, stem, lat_min, lat_max, lon_min, lon_max, out_dir, log):
     np.savetxt(out, table, fmt="%.2f", header=header, comments="")
     log(f"low_freq: {len(table)} pixels -> {out}")
     return [out]
+
+
+def extract_amsr3_l1b(nc, stem, lat_min, lat_max, lon_min, lon_max, out_dir, log):
+    """AMSR3 L1B -> low_freq, 89GHz, 165GHz and 183GHz files (each at its own footprints)."""
+    tables = {}
+    for part, lat, lon, tb, labels in amsr3_l1b(nc):
+        mask = (lat >= lat_min) & (lat <= lat_max) & lon_mask(lon, lon_min, lon_max)
+        mask &= np.isfinite(tb).all(axis=-1)
+        if mask.any():
+            tables.setdefault(part, (labels, []))[1].append(
+                np.column_stack([lat[mask], lon[mask], tb[mask]]))
+    if not tables:
+        log("L1B: no pixels in the box, skipped")
+        return []
+    written = []
+    for part, (labels, rows) in tables.items():
+        table = np.vstack(rows)
+        out = os.path.join(out_dir or ".", f"{stem}_{part}_{lat_min:g}_{lat_max:g}N_"
+                                           f"{lon_min:g}_{lon_max:g}E.txt")
+        header = "\n".join(amsr3_header(nc) +
+                           [" ".join(["#lat", "#lon"] + ["#" + s for s in labels])])
+        np.savetxt(out, table, fmt="%.2f", header=header, comments="")
+        log(f"{part}: {len(table)} pixels -> {out}")
+        written.append(out)
+    return written
 
 
 def extract_amsr3_l2(nc, stem, lat_min, lat_max, lon_min, lon_max, out_dir, log):
