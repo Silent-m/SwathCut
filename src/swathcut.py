@@ -18,10 +18,10 @@ from tkinter import filedialog, messagebox, ttk
 import numpy as np
 from netCDF4 import Dataset
 
-from extract_gmi_band import GMI_LABELS, extract, field_titles, preview_data
+from extract_gmi_band import GMI_LABELS, extract, field_titles, preview_groups
 
 APP_NAME = "SwathCut"
-__version__ = "0.4.0"
+__version__ = "0.5.1"
 AUTHOR = "Lev Mitnik"
 
 HOW_TO = """1. Press Add... and pick one or more .nc files:
@@ -39,7 +39,11 @@ HOW_TO = """1. Press Add... and pick one or more .nc files:
    -999 where JAXA flags a field as NoData.
 4. Choose the output folder (default: folder of the first file).
    The area and the folders are remembered for the next start.
-5. Press Convert. One .txt file is written per file and swath.
+5. Press Convert. The log lists every .txt file written.
+
+Preview shows any channel or field of the selected file: pick it in
+"Preview channel" (the list is filled at the first preview).
+Roll the mouse wheel over the map to zoom in and out around the cursor.
 
 Output: 3 header lines (time, orbit, equator crossing), a
 #lat #lon #channel... line, then "lat lon value..." rows
@@ -244,17 +248,20 @@ class ConverterApp(tk.Tk):
         fname = self.files.get(idx)
         try:
             with Dataset(fname) as nc:
-                lat, lon, tb, labels = preview_data(nc)
+                groups = preview_groups(nc)
+                labels = [lab for g in groups for lab in g[3]]
                 titles = field_titles(nc, labels)
-        except (OSError, KeyError, ValueError) as e:
+        except Exception as e:  # any unreadable or unsupported file: say so
             messagebox.showerror("Preview", f"{os.path.basename(fname)}:\n{e}")
             return
-        self.channel["values"] = labels  # GMI and AMSR3 have different channels
+        self.channel["values"] = labels  # every channel / field of this file
         if self.channel.get() not in labels:
-            self.channel.set(labels[max(len(labels) - 2, 0)])  # 89v GMI, 36-v L1R, 1st L2 field
+            first = groups[0][3]
+            self.channel.set(first[max(len(first) - 2, 0)])  # 89v GMI, 36-v AMSR3, 1st L2 field
+        lat, lon, tb, glabels = next(g for g in groups if self.channel.get() in g[3])
         step = 2  # thin out for speed
         lat, lon = lat[::step, ::step], lon[::step, ::step]
-        tb = tb[::step, ::step, labels.index(self.channel.get())]
+        tb = tb[::step, ::step, glabels.index(self.channel.get())]
         ok = np.isfinite(lat) & np.isfinite(lon) & np.isfinite(tb)
 
         win = tk.Toplevel(self)
@@ -270,7 +277,8 @@ class ConverterApp(tk.Tk):
         ax.set_ylabel("Latitude")
         ax.grid(True, lw=0.5, color="k", alpha=0.4)
         ax.set_title(title)
-        fig.text(0.01, 0.01, "Draw a new area, or drag/resize the box", fontsize=8, color="gray")
+        fig.text(0.01, 0.01, "Draw a new area, or drag/resize the box;  mouse wheel: zoom",
+                 fontsize=8, color="gray")
 
         def on_select(_press, _release):
             x0, x1, y0, y1 = selector.extents
@@ -294,6 +302,23 @@ class ConverterApp(tk.Tk):
         except ValueError:
             pass
         win._selector = selector  # keep a reference, or it stops responding
+
+        def zoom(lo, hi, centre, factor, limit_lo, limit_hi):
+            """New axis limits scaled by factor around centre, kept inside the map."""
+            lo, hi = centre - (centre - lo) * factor, centre + (hi - centre) * factor
+            span = min(hi - lo, limit_hi - limit_lo)
+            lo = min(max(lo, limit_lo), limit_hi - span)
+            return lo, lo + span
+
+        def on_scroll(event):
+            if event.inaxes is not ax:
+                return
+            factor = 0.8 if event.button == "up" else 1.25  # wheel up = zoom in
+            ax.set_xlim(zoom(*ax.get_xlim(), event.xdata, factor, -180, 180))
+            ax.set_ylim(zoom(*ax.get_ylim(), event.ydata, factor, -90, 90))
+            canvas.draw_idle()
+
+        canvas.mpl_connect("scroll_event", on_scroll)
         canvas.draw()
 
     # ---------------------------------------------------------------- convert
@@ -307,26 +332,29 @@ class ConverterApp(tk.Tk):
         except ValueError as e:
             messagebox.showerror("Area", str(e))
             return
-        swaths = {s for s, v in (("S1", self.s1), ("S2", self.s2)) if v.get()}
-        if not swaths:
-            messagebox.showerror("Swaths", "Tick at least one swath.")
-            return
+        swaths = {s for s, v in (("S1", self.s1), ("S2", self.s2)) if v.get()}  # GMI only
         out_dir = self.out_dir.get() or os.path.dirname(files[0])
-        os.makedirs(out_dir, exist_ok=True)
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError as e:
+            messagebox.showerror("Output folder", str(e))
+            return
         save_settings(output_dir=out_dir, box=b)
 
         self.convert_btn.state(["disabled"])
 
         def work():
             n = 0
-            for f in files:
-                self.log(f"--- {os.path.basename(f)}")
-                try:
-                    n += len(extract(f, out_dir=out_dir, swaths=swaths, log=self.log, **b))
-                except Exception as e:  # report and continue with next file
-                    self.log(f"ERROR: {e}")
-            self.log(f"Done: {n} file(s) written to {out_dir}")
-            self.messages.put(None)  # re-enable Convert
+            try:
+                for f in files:
+                    self.log(f"--- {os.path.basename(f)}")
+                    try:
+                        n += len(extract(f, out_dir=out_dir, swaths=swaths, log=self.log, **b))
+                    except Exception as e:  # report and continue with next file
+                        self.log(f"ERROR: {e}")
+                self.log(f"Done: {n} file(s) written to {out_dir}")
+            finally:
+                self.messages.put(None)  # always re-enable Convert
 
         threading.Thread(target=work, daemon=True).start()
 

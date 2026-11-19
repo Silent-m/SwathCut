@@ -1,6 +1,6 @@
 """
-Extract GPM GMI L1B or GOSAT-GW AMSR3 L1R pixels within a lat/lon box and write
-them to text.
+Extract GPM GMI L1B or GOSAT-GW AMSR3 L1B / L1R / L2 pixels within a lat/lon box
+and write them to text.
 
 Usage:
     python extract_gmi_band.py FILE.nc [lat_min lat_max [lon_min lon_max]]
@@ -54,6 +54,7 @@ AMSR3_L1B_GROUPS = [
     ("183GHz", "P183r3", [("183+-3-v", "Tb_Ch183r3V"), ("183+-7-v", "Tb_Ch183r7V")]),
 ]
 L1B_BAD_FLAGS = 4 | 8 | 128  # geometric error, Tb error, count drop-off (RFI bits 0-1 ignored)
+L1R_RESAMPLING_NG = 96        # L1R only: resampling_quality_ng (64 alone = poor, kept)
 
 # AMSR3 L2 quality flags: 0-63 Good, 64-127 LowQuality, 128-254 NoData, 255 fill.
 # LowQuality values are kept; set this to 64 to drop them as well.
@@ -71,11 +72,15 @@ def amsr3_kind(nc):
         return "L1R"
     if "Tb_Ch06V" in nc.variables and "Latitude_P06" in nc.variables:
         return "L1B"
-    if "DataDatasetName" in nc.ncattrs():  # L2 - but L1B has this attribute too
-        first = nc.DataDatasetName.split(";")[0].strip()
-        if first in nc.variables and "Latitude_" + first.rsplit("_", 1)[-1] in nc.variables:
-            return "L2"
     product = getattr(nc, "ProductName", "this AMSR3 product")
+    if "DataDatasetName" in nc.ncattrs():  # Level-2 swath product
+        names = [n.strip() for n in nc.DataDatasetName.split(";") if n.strip()]
+        needed = names + ["Latitude_" + n.rsplit("_", 1)[-1] for n in names]
+        missing = [v for v in dict.fromkeys(needed) if v not in nc.variables]
+        if names and not missing:
+            return "L2"
+        raise ValueError(f"{product}: unexpected file layout, "
+                         f"{', '.join(missing) or 'the data fields'} not found.")
     raise ValueError(f"{product} is not supported. Use AMSR3 L1B, L1R or Level-2 swath files.")
 
 
@@ -100,7 +105,7 @@ def amsr3_l2(nc):
         codes = names
     groups = {}
     for name, code in zip(names, codes):
-        footprint = name.strip().split("_", 1)[1]  # Data1_P89o -> P89o
+        footprint = name.strip().rsplit("_", 1)[-1]  # Data1_P89o -> P89o
         values = as_float(nc[name.strip()])
         if name.strip() + "_Quality" in nc.variables:
             q = np.ma.filled(nc[name.strip() + "_Quality"][:], 255)
@@ -138,19 +143,45 @@ def amsr3_low_freq(nc):
     keep = slice(n, len(nc.dimensions["time"]) - n)
     lat = as_float(nc["Latitude_P89o"])[keep]
     lon = as_float(nc["Longitude_P89o"])[keep]
-    tb = np.stack([as_float(nc[v])[keep] for _, v in AMSR3_LOW_FREQ], axis=-1)
-    return lat, lon, tb, [lab for lab, _ in AMSR3_LOW_FREQ]
+    tbs = []
+    for _, v in AMSR3_LOW_FREQ:
+        tb = as_float(nc[v])[keep]
+        if v + "_Quality" in nc.variables:  # same rule as L1B, plus failed resampling
+            q = np.ma.filled(nc[v + "_Quality"][:], 255)[keep]
+            tb[(q == 255) | ((q & L1B_BAD_FLAGS) > 0)
+               | ((q & L1R_RESAMPLING_NG) == L1R_RESAMPLING_NG)] = np.nan
+        tbs.append(tb)
+    return lat, lon, np.stack(tbs, axis=-1), [lab for lab, _ in AMSR3_LOW_FREQ]
 
 
-def preview_data(nc):
-    """lat, lon, Tb[..., ch], labels of the first swath (GMI S1 or AMSR3 low_freq)."""
+def preview_groups(nc):
+    """[(lat, lon, values[..., n], labels), ...]: everything the file can show.
+
+    One entry per footprint set: GMI S1 and S2; AMSR3 L1B low_freq, 89, 165 and
+    183 GHz; AMSR3 L1R low_freq; AMSR3 L2 fields. Sets with the same labels
+    (89 GHz A and B scans) are joined.
+    """
     if is_amsr3(nc):
         kind = amsr3_kind(nc)
         if kind == "L1B":
-            return amsr3_l1b(nc)[0][1:]  # the low_freq group
-        return amsr3_low_freq(nc) if kind == "L1R" else amsr3_l2(nc)[0]
-    g = nc["S1"]
-    return as_float(g["Latitude"]), as_float(g["Longitude"]), as_float(g["Tb"]), GMI_LABELS[9]
+            groups = [g[1:] for g in amsr3_l1b(nc)]
+        else:
+            groups = [amsr3_low_freq(nc)] if kind == "L1R" else amsr3_l2(nc)
+    else:
+        groups = []
+        for _, g in find_swaths(nc):
+            if "Tb" in g.variables:
+                tb = as_float(g["Tb"])
+                tb = tb[..., None] if tb.ndim == 2 else tb
+                labels = GMI_LABELS.get(tb.shape[-1], [f"ch{i + 1}" for i in range(tb.shape[-1])])
+                groups.append((as_float(g["Latitude"]), as_float(g["Longitude"]), tb, labels))
+        if not groups:
+            raise ValueError("Not a GPM GMI L1B or AMSR3 file: no brightness temperatures found.")
+    merged = {}
+    for lat, lon, values, labels in groups:
+        merged.setdefault(tuple(labels), []).append((lat, lon, values))
+    return [tuple(np.concatenate([p[i] for p in parts]) for i in range(3)) + (list(labels),)
+            for labels, parts in merged.items()]
 
 
 GMI_FREQ = {"10": "10.65", "18": "18.7", "23": "23.8", "36": "36.64", "89": "89.0",
@@ -165,9 +196,10 @@ def field_titles(nc, labels):
                 for lab in labels if lab[:-1] in GMI_FREQ}
     kind = amsr3_kind(nc)
     if kind in ("L1R", "L1B"):
-        names = dict(AMSR3_LOW_FREQ if kind == "L1R" else AMSR3_L1B_GROUPS[0][2])
-        return {lab: (f"AMSR3 {kind} " + nc[names[lab]].long_name.split(" (")[0], "K")
-                for lab in labels}
+        names = dict(AMSR3_LOW_FREQ if kind == "L1R" else
+                     [c for g in reversed(AMSR3_L1B_GROUPS) for c in g[2]])
+        return {lab: (f"AMSR3 {kind} " + nc[names[lab]].long_name.split(" (")[0]
+                      .replace("GHz-A ", "GHz "), "K") for lab in labels}
     names = [n.strip() for n in nc.DataDatasetName.split(";") if n.strip()]
     codes = [c.strip() for c in getattr(nc, "DataCode", "").split(";") if c.strip()]
     longs = [t.strip() for t in getattr(nc, "DataLongName", "").split(";") if t.strip()]
@@ -283,11 +315,13 @@ def extract(fname, lat_min=50.0, lat_max=65.0, lon_min=-180.0, lon_max=180.0,
             np.savetxt(out, table, fmt="%.2f", header=header, comments="")
             log(f"{tag}: {len(table)} pixels -> {out}")
             written.append(out)
+        if swaths is not None and not set(swaths) & {p.strip("/") for p, _ in found}:
+            log("GMI: no swath ticked (S1 / S2), skipped")
     return written
 
 
 def extract_amsr3(nc, stem, lat_min, lat_max, lon_min, lon_max, out_dir, log):
-    """AMSR3 L1R -> one *_low_freq_*.txt file in the AMSR2 low_freq layout."""
+    """AMSR3: L1R -> one *_low_freq_*.txt file (AMSR2 layout); L1B and L2 -> see below."""
     kind = amsr3_kind(nc)
     if kind == "L2":
         return extract_amsr3_l2(nc, stem, lat_min, lat_max, lon_min, lon_max, out_dir, log)
